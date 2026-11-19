@@ -368,6 +368,7 @@ function openUtility(markup){
 function errorMessage(error){
  if(error.code==='23505')return '已有相同记录，请刷新查看。';
  if(error.code==='42501')return '当前账号没有此操作权限。';
+ if(/already registered|already exists/i.test(error.message))return '这个 ID 已注册，请直接登录。';
  if(/invalid login/i.test(error.message))return '账号或密码不正确。';
  if(/email not confirmed/i.test(error.message))return '请先到注册邮箱完成验证。';
  return error.message;
@@ -375,27 +376,47 @@ function errorMessage(error){
 async function requireReady(){
  if(!ready){try{await syncCloud()}catch(err){syncError(err);throw Error('请先连接并初始化云端片库。')}}
 }
+async function loginAddress(id){
+ if(id==='林科森')return 'qd-admin@members.invalid';
+ const digest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(id)));
+ const tag=Array.from(digest.slice(0,24),byte=>byte.toString(16).padStart(2,'0')).join('');
+ return 'qd-'+tag+'@members.invalid';
+}
 function showAccount(after,register=false){
  if(active){
   openUtility('<h2 id="utility-title">'+escapeHTML(active.name)+'</h2><p>'+(active.is_admin?'社区管理员':'社区影友')+'</p><button id="logout" class="outline">退出登录</button>');
+  if(active.name==='林科森'&&!active.is_admin&&/^[0-9a-f-]{36}$/i.test(active.id)){
+   const grant="update public.qd_members set is_admin = true where id = '"+active.id+"' and name = '林科森' returning name, is_admin;";
+   const panel=document.createElement('details');
+   panel.innerHTML='<summary>管理员授权 SQL</summary><p>在 Supabase SQL Editor 运行以下语句，完成后刷新网页。</p><textarea rows="4" readonly aria-label="本账号的授权 SQL"></textarea><button type="button" class="outline small">复制 SQL</button>';
+   const box=panel.querySelector('textarea');box.value=grant;box.style.width='100%';
+   panel.querySelector('button').onclick=async()=>{try{await navigator.clipboard.writeText(grant);announce('已复制授权 SQL')}catch{box.select()}};
+   $('logout').before(panel);
+  }
   $('logout').onclick=async()=>{try{await api('/auth/v1/logout?scope=local',{method:'POST',token:await access()});setSession(null);active=null;shareName='';$('utility').close();await syncCloud()}catch(err){announce(errorMessage(err))}};return;
  }
  const label=register?'注册':'登录';
- openUtility('<h2 id="utility-title">'+label+'</h2><form id="member-form">'+(register?'<label>昵称<input name="nickname" required maxlength="18"></label>':'')+
- '<label>'+(register?'邮箱':'邮箱或管理员账号')+'<input name="identity" type="'+(register?'email':'text')+'" required autocomplete="username"></label>'+
+ openUtility('<h2 id="utility-title">'+label+'</h2><form id="member-form"><label>ID<input name="identity" type="text" required '+(register?'maxlength="18"':'maxlength="254"')+' autocomplete="username" autocapitalize="none" spellcheck="false"></label>'+
  '<label>密码<input name="password" type="password" minlength="6" required autocomplete="'+(register?'new-password':'current-password')+'"></label>'+
  '<p id="member-error" role="status"></p><div class="row"><button class="gold">'+label+'</button><button class="plain" type="button" id="change-mode">'+(register?'已有账号，去登录':'注册新账号')+'</button></div></form>');
  $('change-mode').onclick=()=>showAccount(after,!register);
  $('member-form').onsubmit=async e=>{
   e.preventDefault();const form=e.target,button=form.querySelector('.gold');button.disabled=true;
   const fields=new FormData(form),identity=fields.get('identity').trim();
-  const email=identity==='林科森'?'qd-admin@members.invalid':identity;
-  const body={email,password:fields.get('password')};
+
   try{
    await requireReady();
-   if(register){const name=fields.get('nickname').trim().normalize('NFKC');if(!name||name==='林科森')throw Error('请选择其他昵称。');body.data={qd_name:name}}
+   const id=identity.normalize('NFKC').trim();
+   if(!id||register&&(Array.from(id).length>18||id.includes('@')))throw Error('ID 请填写 1 至 18 个字，不能包含 @。');
+   const email=!register&&id.includes('@')?id:await loginAddress(id);
+   const body={email,password:fields.get('password')};
+   if(register){
+    const settings=await api('/auth/v1/settings');
+    if(!settings.mailer_autoconfirm)throw Error('ID 注册暂未开放，请管理员先在 Supabase 关闭 Confirm email。');
+    body.data={qd_name:id};
+   }
    const result=await api(register?'/auth/v1/signup':'/auth/v1/token?grant_type=password',{method:'POST',body});
-   if(!result.access_token){form.querySelector('[role=status]').textContent='请到邮箱完成验证，然后回到此页登录。';return}
+   if(!result.access_token){form.querySelector('[role=status]').textContent='注册未完成，请联系管理员检查登录设置。';return}
    setSession(result);await syncCloud();
    if(!active)throw Error('此登录账号尚未建立社区资料，请联系管理员。');
    $('utility').close();after?.();
